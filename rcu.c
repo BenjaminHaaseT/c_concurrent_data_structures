@@ -34,7 +34,7 @@ void free_rcu_node(rcu_node_t *node)
 
 typedef struct rcu_stack_node_t {
     rcu_node_t *node_ptr;
-    struct rcu_stack_node_t *next
+    struct rcu_stack_node_t *next;
 } rcu_stack_node_t;
 
 void free_rcu_stack_node(rcu_stack_node_t *sn)
@@ -57,8 +57,8 @@ typedef struct {
     rcu_node_t *_Atomic data_ptr;
     _Atomic int state;
     _Atomic bool epoch_flag;
-    rcu_stack_t *_Atomic cur_epoch_head;
-    rcu_stack_t *_Atomic final_epoch_head;
+    rcu_stack_node_t *_Atomic cur_epoch_head;
+    rcu_stack_node_t *_Atomic final_epoch_head;
 } rcu_t;
 
 rcu_node_t *rcu_read(rcu_t *rcu)
@@ -76,6 +76,7 @@ rcu_node_t *rcu_read(rcu_t *rcu)
     ) {
         // ensure we synchronize with all other threads that have updated the value of 'state' and 'epoch_flag'
         atomic_thread_fence(memory_order_acquire);
+
         // new sentinel node
         rcu_stack_node_t *new_cur_epoch_head = (rcu_stack_node_t*)malloc(sizeof(rcu_stack_node_t));
         new_cur_epoch_head->node_ptr = NULL;
@@ -90,7 +91,7 @@ rcu_node_t *rcu_read(rcu_t *rcu)
         rcu_stack_node_t *old_cur_epoch_head = atomic_exchange_explicit(&(rcu->cur_epoch_head), new_cur_epoch_head, memory_order_relaxed);
         rcu_stack_node_t *old_final_epoch_head = atomic_exchange_explicit(&(rcu->final_epoch_head), old_cur_epoch_head, memory_order_relaxed);
         // deallocate old_final_epoch_head
-        free(old_final_epoch_head);
+        free_rcu_stack_node(old_final_epoch_head);
 
         // finally signal that epoch has finished
         atomic_exchange_explicit(&(rcu->epoch_flag), false, memory_order_release);
@@ -98,6 +99,26 @@ rcu_node_t *rcu_read(rcu_t *rcu)
 
     return res;
 }
+
+void rcu_push(rcu_t *rcu, rcu_node_t *node)
+{
+    rcu_stack_node_t *neo = (rcu_stack_node_t*)malloc(sizeof(rcu_stack_node_t));
+    neo->node_ptr = node;
+    rcu_stack_node_t *cur_head = atomic_load_explicit(&(rcu->cur_epoch_head), memory_order_relaxed);
+    neo->next = cur_head;
+
+    while (!atomic_compare_exchange_strong_explicit(&(rcu->cur_epoch_head), &cur_head, neo, memory_order_relaxed, memory_order_relaxed))
+        neo->next = cur_head;
+}
+
+void rcu_update(rcu_t *rcu, rcu_node_t *neo)
+{
+    rcu_node_t *cur_data = atomic_load_explicit(&(rcu->data_ptr), memory_order_relaxed);
+    while (!atomic_compare_exchange_strong_explicit(&(rcu->data_ptr), &cur_data, neo, memory_order_relaxed, memory_order_relaxed));
+    rcu_push(rcu, cur_data);
+}
+
+
 
 int main(int argc, char **argv)
 {
