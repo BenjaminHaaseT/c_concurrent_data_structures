@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 typedef struct {
     void *data;
@@ -26,7 +27,8 @@ void free_rcu_node(rcu_node_t *node)
     {
         // ensure that acquire is used here to synchronize with all previous decrements of the reference count
         atomic_thread_fence(memory_order_acquire);
-        free(node->data);
+        if (node->data)
+            free(node->data);
         node->data = NULL;
         free(node);
     }
@@ -61,6 +63,24 @@ typedef struct {
     rcu_stack_node_t *_Atomic final_epoch_head;
 } rcu_t;
 
+void rcu_init(rcu_t *rcu, rcu_node_t *init_data)
+{
+    atomic_store(&(rcu->data_ptr), init_data);
+    rcu->state = 0;
+    rcu->epoch_flag = false;
+
+    rcu_stack_node_t *cur_epoch_head = (rcu_stack_node_t*)malloc(sizeof(rcu_stack_node_t));
+    cur_epoch_head->node_ptr = NULL;
+    cur_epoch_head->next = NULL;
+
+    rcu_stack_node_t *final_epoch_head = (rcu_stack_node_t*)malloc(sizeof(rcu_stack_node_t));
+    final_epoch_head->node_ptr = NULL;
+    final_epoch_head->next = NULL;
+
+    atomic_store(&(rcu->cur_epoch_head), cur_epoch_head);
+    atomic_store(&(rcu->final_epoch_head), final_epoch_head);
+}
+
 rcu_node_t *rcu_read(rcu_t *rcu)
 {
     // increase the state to signal we are entering critical section
@@ -90,6 +110,7 @@ rcu_node_t *rcu_read(rcu_t *rcu)
 
         rcu_stack_node_t *old_cur_epoch_head = atomic_exchange_explicit(&(rcu->cur_epoch_head), new_cur_epoch_head, memory_order_relaxed);
         rcu_stack_node_t *old_final_epoch_head = atomic_exchange_explicit(&(rcu->final_epoch_head), old_cur_epoch_head, memory_order_relaxed);
+        
         // deallocate old_final_epoch_head
         free_rcu_stack_node(old_final_epoch_head);
 
@@ -119,9 +140,10 @@ void rcu_update(rcu_t *rcu, rcu_node_t *neo)
 }
 
 
-
 int main(int argc, char **argv)
 {
+    int test_data[26] = {0};
+    
 
     return 0;
 }
