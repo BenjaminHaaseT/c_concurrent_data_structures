@@ -4,6 +4,9 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <string.h>
+#include <errno.h>
+
 
 typedef struct {
     void *data;
@@ -139,11 +142,101 @@ void rcu_update(rcu_t *rcu, rcu_node_t *neo)
     rcu_push(rcu, cur_data);
 }
 
+void free_rcu(rcu_t *rcu)
+{
+    rcu_node_t *data = atomic_exchange(&(rcu->data_ptr), NULL);
+    free_rcu_node(data);
+
+    rcu_stack_node_t *old_cur_epoch_head = atomic_exchange(&(rcu->cur_epoch_head), NULL);
+    rcu_stack_node_t *old_final_epoch_head = atomic_exchange(&(rcu->final_epoch_head), NULL);
+    free_rcu_stack_node(old_final_epoch_head);
+    free_rcu_stack_node(old_cur_epoch_head);
+}
+
+struct rcu_test_params {
+    rcu_t *rcu;
+    char c;
+};
+
+void *test_thread_body(void *arg)
+{
+    struct rcu_test_params *params = (struct rcu_test_params*)arg;
+    rcu_t *rcu = params->rcu;
+    char c = params->c;
+
+    for (int i = 0; i < 1000; i++)
+    {
+        // read the rcu node from the rcu
+        rcu_node_t *res = rcu_read(rcu);
+
+        // get a pointer to its currently held data
+        int *data = (int*) res->data;
+
+        // copy old data into a new array
+        int *new_data = (int*)malloc(26 *sizeof(int));
+        for (int j = 0; j < 26; j++)
+            new_data[j] = data[j];
+
+        // free the old node since we no longer need it
+        free_rcu_node(res);
+
+        // update count of current thread;
+        new_data[c % 'a'] += 1;
+        rcu_node_t *neo = (rcu_node_t*)malloc(sizeof(rcu_node_t));
+        rcu_node_init(neo, new_data);
+
+        // now attempt to update the rcu
+        rcu_update(rcu, neo);
+    }
+
+    pthread_exit(NULL);
+}
+
 
 int main(int argc, char **argv)
 {
-    int test_data[26] = {0};
-    
+    int *test_data = (int*)calloc(26, sizeof(int));
+    rcu_node_t *init_data = (rcu_node_t*)malloc(sizeof(rcu_node_t));
+    rcu_node_init(init_data, test_data);
+
+    rcu_t *rcu = (rcu_t*)malloc(sizeof(rcu_t));
+    rcu_init(rcu, init_data);
+
+    pthread_t threads[26];
+    struct rcu_test_params params[26];
+
+    printf("spawning threads...\n");
+
+    for (int i = 0; i < 26; i++)
+    {
+        params[i].rcu = rcu;
+        params[i].c = (char)i + 'a';
+        pthread_create(threads + i, NULL, test_thread_body, params + i);
+    }
+
+    printf("joining threads...\n");
+
+    int res;
+    for (int i = 0; i < 26; i++)
+    {
+        res = pthread_join(threads[i], NULL);
+        if (res)
+        {
+            fprintf(stderr, "error joing thread %d: %s\n", i, strerror(errno));
+        }
+    }
+
+    printf("final data\n");
+    rcu_node_t *final_data = (rcu_node_t*)rcu_read(rcu);
+    for (int i = 0; i < 26; i++)
+    {
+        printf("%c: %d\n", (char)i + 'a', ((int*)(final_data->data))[i]);
+    }
+
+    // free all allocations
+    // free_rcu_node(init_data);
+    // free_rcu_node(final_data);
+    // free_rcu(rcu);
 
     return 0;
 }
